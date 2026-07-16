@@ -289,20 +289,40 @@ def prep_base(
     base = df.dropna(how="all").copy()
 
     col_val = _find_col(base, ["Valor total", "VALOR TOTAL", "Valor Total", "VALOR", "Valor"])
-    col_dt = _find_col(base, ["DATA", "Data", "Data de competência", "Data de Competência", "Data de vencimento", "Data de confirmação"])
+    # Para o relatório de contas a pagar, a data principal é o vencimento.
+    # Assim, lançamentos "Em aberto" também entram na análise.
+    col_dt = _find_col(base, ["DATA", "Data", "Data de vencimento", "Data de Vencimento", "Data de competência", "Data de Competência", "Data de confirmação", "Data de Confirmação"])
     col_plano = _find_col(base, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
     col_desc = _find_col(base, ["Descrição", "DESCRIÇÃO", "Descricao", "DESCRICAO"])
 
     if col_val is None or col_dt is None or col_plano is None:
         return None
 
-    tipo_df = read_sheet(dados_path, "TIPO", dados_sig)
-    if tipo_df is None:
-        return None
+    # A aba TIPO pode vir com cabeçalho ou sem cabeçalho.
+    # No modelo real enviado pelo usuário, ela não possui cabeçalho:
+    # coluna A = Plano de contas | coluna B = TIPO.
+    try:
+        tipo_real_sheet = resolve_sheet(get_excel_file(dados_path, dados_sig), "TIPO")
+        if tipo_real_sheet is None:
+            return None
 
-    tipo_plano_col = _find_col(tipo_df, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
-    tipo_col = _find_col(tipo_df, ["TIPO", "Tipo"])
-    if tipo_plano_col is None or tipo_col is None:
+        tipo_df = pd.read_excel(dados_path, sheet_name=tipo_real_sheet)
+        tipo_df.columns = [str(c).strip() for c in tipo_df.columns]
+
+        tipo_plano_col = _find_col(tipo_df, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
+        tipo_col = _find_col(tipo_df, ["TIPO", "Tipo"])
+
+        # Fallback para aba sem cabeçalho: relê com header=None e usa as 2 primeiras colunas.
+        if tipo_plano_col is None or tipo_col is None:
+            tipo_df = pd.read_excel(dados_path, sheet_name=tipo_real_sheet, header=None)
+            tipo_df = tipo_df.dropna(how="all").copy()
+            if tipo_df.shape[1] < 2:
+                return None
+            tipo_df = tipo_df.iloc[:, :2].copy()
+            tipo_df.columns = ["PLANO DE CONTAS", "TIPO"]
+            tipo_plano_col = "PLANO DE CONTAS"
+            tipo_col = "TIPO"
+    except Exception:
         return None
 
     mapa_tipo = tipo_df[[tipo_plano_col, tipo_col]].dropna(subset=[tipo_plano_col]).copy()
@@ -846,7 +866,7 @@ with st.sidebar.expander("Diagnóstico dos arquivos"):
 
 base_tmp = prep_base(plano_path, plano_sig, dados_path, dados_sig)
 if base_tmp is None:
-    st.error("Não foi possível montar a base. Confira se o arquivo PLANO DE CONTAS possui Data, Descrição, Plano de contas e Valor total; e se DADOS EXTERNOS possui a aba TIPO com Plano de contas e TIPO.")
+    st.error("Não foi possível montar a base. O sistema aceita a aba TIPO com ou sem cabeçalho. Confira se PLANO DE CONTAS contém Descrição, Plano de contas, Valor total e uma coluna de data válida.")
     st.stop()
 
 pendentes = planos_sem_tipo(base_tmp)
