@@ -935,37 +935,41 @@ meses_default = [MES_NUM_TO_PT[m] for m in meses_base_ano if m in MES_NUM_TO_PT]
 if not meses_default:
     meses_default = MESES_PT
 
-# O Streamlit preserva o valor anterior do multiselect na sessão.
-# Quando o arquivo é trocado, ele pode continuar com JAN–JUN selecionados,
-# mesmo que a nova base contenha somente JUL. Nesse caso, redefinimos
-# automaticamente o filtro para os meses existentes na base.
-meses_key = f"meses_{ano_ref}"
-meses_sessao = st.session_state.get(meses_key, [])
-
-if meses_default != MESES_PT:
-    meses_validos_sessao = [
-        mes for mes in meses_sessao
-        if mes in meses_default
-    ]
-    if not meses_validos_sessao:
-        st.session_state[meses_key] = meses_default
-    elif set(meses_validos_sessao) != set(meses_sessao):
-        st.session_state[meses_key] = meses_validos_sessao
+# A chave inclui a assinatura dos arquivos. Assim, ao substituir uma planilha,
+# o filtro inicia nos meses existentes na nova base; depois disso, a seleção
+# do usuário permanece livre e não é sobrescrita pelo código.
+meses_key = (
+    f"meses_{ano_ref}_"
+    f"{plano_sig[0]}_{plano_sig[1]}_"
+    f"{dados_sig[0]}_{dados_sig[1]}"
+)
 
 meses_pt_sel = st.sidebar.multiselect(
     "Meses",
     options=MESES_PT,
     default=meses_default,
     key=meses_key,
+    help=(
+        "Selecione livremente um ou mais meses. Meses sem lançamentos "
+        "confirmados serão exibidos com valor zero."
+    ),
 )
 
-# Proteção adicional para impedir que a página use meses sem lançamentos
-# confirmados após a troca dos arquivos no repositório.
-if meses_default != MESES_PT and not set(meses_pt_sel).intersection(meses_default):
-    meses_pt_sel = meses_default
-    st.sidebar.warning(
-        "O filtro foi ajustado automaticamente para os meses que possuem "
-        f"lançamentos confirmados: {', '.join(meses_default)}."
+# Não altera a seleção do usuário. Apenas informa quando o período escolhido
+# não contém lançamentos confirmados no arquivo PLANO DE CONTAS.
+meses_com_lancamentos = set(meses_default) if meses_default != MESES_PT else set()
+if meses_pt_sel and meses_com_lancamentos:
+    meses_escolhidos_com_dados = set(meses_pt_sel).intersection(meses_com_lancamentos)
+    if not meses_escolhidos_com_dados:
+        st.sidebar.warning(
+            "Os meses selecionados não possuem lançamentos com "
+            "'Data de confirmação'. A tabela será exibida com valores zerados "
+            "para as contas do PLANO DE CONTAS."
+        )
+
+if not meses_pt_sel:
+    st.sidebar.info(
+        "Nenhum mês selecionado. Selecione pelo menos um mês para montar as tabelas."
     )
 
 # Diagnóstico objetivo da base carregada.
