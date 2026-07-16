@@ -277,9 +277,10 @@ def prep_base(
         header = _detect_header_row(
             plano_path,
             real_sheet,
-            [["DATA", "Data de vencimento", "Data de competência", "Data de confirmação"],
+            [["Data de confirmação"],
+             ["Descrição"],
              ["Plano de contas"],
-             ["Valor total", "Valor"]],
+             ["Valor total"]],
         )
         df = pd.read_excel(plano_path, sheet_name=real_sheet, header=header)
     except Exception:
@@ -289,9 +290,8 @@ def prep_base(
     base = df.dropna(how="all").copy()
 
     col_val = _find_col(base, ["Valor total", "VALOR TOTAL", "Valor Total", "VALOR", "Valor"])
-    # Para o relatório de contas a pagar, a data principal é o vencimento.
-    # Assim, lançamentos "Em aberto" também entram na análise.
-    col_dt = _find_col(base, ["DATA", "Data", "Data de vencimento", "Data de Vencimento", "Data de competência", "Data de Competência", "Data de confirmação", "Data de Confirmação"])
+    # Regra definida pelo usuário: usar exclusivamente Data de confirmação como data do lançamento.
+    col_dt = _find_col(base, ["Data de confirmação", "Data de Confirmação", "DATA DE CONFIRMAÇÃO", "Data confirmacao", "DATA CONFIRMACAO"])
     col_plano = _find_col(base, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
     col_desc = _find_col(base, ["Descrição", "DESCRIÇÃO", "Descricao", "DESCRICAO"])
 
@@ -647,6 +647,20 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
     meses_sel = [MES_PT_TO_NUM[m] for m in meses_pt]
 
+    base_periodo_check = prep_base(plano_path, plano_sig, dados_path, dados_sig)
+    if base_periodo_check is not None:
+        qtd_periodo = len(base_periodo_check[(base_periodo_check["_ano"] == int(ano_ref)) & (base_periodo_check["_mes"].isin(meses_sel))])
+        if qtd_periodo == 0:
+            meses_com_dados = sorted(
+                base_periodo_check.loc[base_periodo_check["_ano"] == int(ano_ref), "_mes"]
+                .dropna().astype(int).unique().tolist()
+            )
+            nomes = ", ".join(MES_NUM_TO_PT[m] for m in meses_com_dados) if meses_com_dados else "nenhum mês"
+            st.warning(
+                f"O arquivo PLANO DE CONTAS não possui lançamentos nos meses selecionados. "
+                f"Para {ano_ref}, há lançamentos em: {nomes}."
+            )
+
     xls = get_excel_file(dados_path, dados_sig)
 
     df_receita = read_sheet(dados_path, "RECEITA", dados_sig)
@@ -743,6 +757,20 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
 
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
     meses_sel = [MES_PT_TO_NUM[m] for m in meses_pt]
+
+    base_periodo_check = prep_base(plano_path, plano_sig, dados_path, dados_sig)
+    if base_periodo_check is not None:
+        qtd_periodo = len(base_periodo_check[(base_periodo_check["_ano"] == int(ano_ref)) & (base_periodo_check["_mes"].isin(meses_sel))])
+        if qtd_periodo == 0:
+            meses_com_dados = sorted(
+                base_periodo_check.loc[base_periodo_check["_ano"] == int(ano_ref), "_mes"]
+                .dropna().astype(int).unique().tolist()
+            )
+            nomes = ", ".join(MES_NUM_TO_PT[m] for m in meses_com_dados) if meses_com_dados else "nenhum mês"
+            st.warning(
+                f"O arquivo PLANO DE CONTAS não possui lançamentos nos meses selecionados. "
+                f"Para {ano_ref}, há lançamentos em: {nomes}."
+            )
 
     xls = get_excel_file(dados_path, dados_sig)
 
@@ -882,8 +910,6 @@ if not pendentes.empty:
     )
     st.caption("Preencha a coluna TIPO, copie as linhas para a aba TIPO de DADOS EXTERNOS e atualize o arquivo no repositório.")
 
-meses_pt_sel = st.sidebar.multiselect("Meses", options=MESES_PT, default=MESES_PT)
-
 anos = set(base_tmp["_ano"].dropna().astype(int).unique().tolist())
 for sheet in ["RECEITA", "CMV", "RECEBIMENTO"]:
     df_tmp = read_sheet(dados_path, sheet, dados_sig)
@@ -898,6 +924,35 @@ if not anos:
     st.stop()
 
 ano_ref = st.sidebar.selectbox("Ano", options=anos, index=len(anos) - 1)
+
+# Por padrão, abre nos meses realmente existentes no arquivo PLANO DE CONTAS.
+# Isso evita mostrar janeiro a junho zerados quando o relatório anexado contém apenas julho.
+meses_base_ano = sorted(
+    base_tmp.loc[base_tmp["_ano"] == int(ano_ref), "_mes"]
+    .dropna().astype(int).unique().tolist()
+)
+meses_default = [MES_NUM_TO_PT[m] for m in meses_base_ano if m in MES_NUM_TO_PT]
+if not meses_default:
+    meses_default = MESES_PT
+
+meses_pt_sel = st.sidebar.multiselect(
+    "Meses",
+    options=MESES_PT,
+    default=meses_default,
+    key=f"meses_{ano_ref}",
+)
+
+# Diagnóstico objetivo da base carregada.
+base_ano = base_tmp[base_tmp["_ano"] == int(ano_ref)].copy()
+if not base_ano.empty:
+    dt_min = base_ano["_dt"].min()
+    dt_max = base_ano["_dt"].max()
+    st.sidebar.info(
+        f"PLANO DE CONTAS: {len(base_ano):,} lançamentos em {ano_ref} "
+        f"({dt_min.strftime('%d/%m/%Y')} a {dt_max.strftime('%d/%m/%Y')})."
+        .replace(',', '.')
+    )
+
 pagina = st.sidebar.radio("Página", ["DRE", "DFC"])
 
 if pagina == "DRE":
