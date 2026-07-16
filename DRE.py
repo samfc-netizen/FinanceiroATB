@@ -144,26 +144,46 @@ def sintetizar_plano_contas(nome: object) -> str:
 
 
 # ----------------------------
-# Excel auto-find + cache
+# Localização dos dois arquivos + cache
 # ----------------------------
 
-def _auto_find_excel() -> Optional[str]:
-    preferred = [
-        "DRE E FLUXO DE CAIXA.xlsx",
-        "DRE E DFC GERAL.xlsx",
-    ]
-    for fn in preferred:
+PLANO_FILE_HINTS = [
+    "PLANO DE CONTAS.xlsx", "PLANO DE CONTAS.xlsm", "PLANO DE CONTAS.xls",
+]
+DADOS_EXTERNOS_FILE_HINTS = [
+    "DADOS EXTERNOS.xlsx", "DADOS EXTERNOS.xlsm", "DADOS EXTERNOS.xls",
+]
+
+
+def _excel_files() -> List[str]:
+    files: List[str] = []
+    for pat in ["*.xlsx", "*.xlsm", "*.xls"]:
+        files.extend(glob.glob(pat))
+    return [f for f in files if os.path.isfile(f) and not os.path.basename(f).startswith("~$")]
+
+
+def _find_named_excel(hints: List[str], required_tokens: List[str]) -> Optional[str]:
+    for fn in hints:
         if os.path.exists(fn):
             return fn
 
-    files = []
-    for pat in ["*.xlsx", "*.xlsm", "*.xls"]:
-        files.extend(glob.glob(pat))
-    files = [f for f in files if os.path.isfile(f)]
-    if not files:
+    candidates = []
+    for f in _excel_files():
+        norm = _norm_txt(os.path.splitext(os.path.basename(f))[0])
+        if all(tok in norm for tok in required_tokens):
+            candidates.append(f)
+    if not candidates:
         return None
-    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return files[0]
+    candidates.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    return candidates[0]
+
+
+def find_plano_contas_file() -> Optional[str]:
+    return _find_named_excel(PLANO_FILE_HINTS, ["plano", "contas"])
+
+
+def find_dados_externos_file() -> Optional[str]:
+    return _find_named_excel(DADOS_EXTERNOS_FILE_HINTS, ["dados", "externos"])
 
 
 def excel_signature(path: str) -> Tuple[int, int]:
@@ -173,7 +193,6 @@ def excel_signature(path: str) -> Tuple[int, int]:
 
 @st.cache_resource(show_spinner=False)
 def get_excel_file(excel_path: str, sig: Tuple[int, int]) -> pd.ExcelFile:
-    # ExcelFile não é serializável -> cache_resource
     return pd.ExcelFile(excel_path)
 
 
@@ -182,24 +201,47 @@ def resolve_sheet(xls: pd.ExcelFile, desired: str) -> Optional[str]:
     mapping = {_norm_sheet_name(s): s for s in xls.sheet_names}
     if want in mapping:
         return mapping[want]
-    # fallback: contains (ex.: "RECEITA 2026")
     for k, real in mapping.items():
         if want in k:
             return real
     return None
 
 
+def _detect_header_row(excel_path: str, sheet_name: str, required_groups: List[List[str]], max_rows: int = 40) -> int:
+    raw = pd.read_excel(excel_path, sheet_name=sheet_name, header=None, nrows=max_rows)
+    for idx, row in raw.iterrows():
+        values = {_norm_txt(v) for v in row.tolist() if _norm_txt(v)}
+        ok = True
+        for group in required_groups:
+            if not any(_norm_txt(c) in values for c in group):
+                ok = False
+                break
+        if ok:
+            return int(idx)
+    return 0
+
+
 @st.cache_data(show_spinner=False)
-def read_sheet(excel_path: str, desired_sheet: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
+def read_sheet(excel_path: str, desired_sheet: str, sig: Tuple[int, int], auto_header: bool = False) -> Optional[pd.DataFrame]:
     xls = get_excel_file(excel_path, sig)
     real = resolve_sheet(xls, desired_sheet)
     if real is None:
         return None
     try:
-        df = pd.read_excel(excel_path, sheet_name=real)
+        header = 0
+        if auto_header:
+            header = _detect_header_row(
+                excel_path,
+                real,
+                [["DATA", "Data de vencimento", "Data de competência", "Data de confirmação"],
+                 ["Plano de contas"],
+                 ["Valor total", "Valor"]],
+            )
+        df = pd.read_excel(excel_path, sheet_name=real, header=header)
     except Exception:
         return None
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(how="all")
     return df
 
 
@@ -218,44 +260,82 @@ def _find_col(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
 
 
 @st.cache_data(show_spinner=False)
-def prep_base(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
-    """
-    Esperado em BASE DE DADOS:
-      - TIPO
-      - Valor total
-      - DATA
-      - Plano de contas
-      - Descrição
-    """
-    df = read_sheet(excel_path, "BASE DE DADOS", sig)
-    if df is None:
+def prep_base(
+    plano_path: str,
+    plano_sig: Tuple[int, int],
+    dados_path: str,
+    dados_sig: Tuple[int, int],
+) -> Optional[pd.DataFrame]:
+    """Lê os lançamentos do arquivo PLANO DE CONTAS e acrescenta TIPO via aba TIPO."""
+    xls_plano = get_excel_file(plano_path, plano_sig)
+    # Usa a primeira aba; o nome do arquivo é a referência principal.
+    real_sheet = xls_plano.sheet_names[0] if xls_plano.sheet_names else None
+    if real_sheet is None:
         return None
 
-    base = df.copy()
-    col_tipo = _find_col(base, ["TIPO"])
+    try:
+        header = _detect_header_row(
+            plano_path,
+            real_sheet,
+            [["DATA", "Data de vencimento", "Data de competência", "Data de confirmação"],
+             ["Plano de contas"],
+             ["Valor total", "Valor"]],
+        )
+        df = pd.read_excel(plano_path, sheet_name=real_sheet, header=header)
+    except Exception:
+        return None
+
+    df.columns = [str(c).strip() for c in df.columns]
+    base = df.dropna(how="all").copy()
+
     col_val = _find_col(base, ["Valor total", "VALOR TOTAL", "Valor Total", "VALOR", "Valor"])
-    col_dt = _find_col(base, ["DATA", "Data"])
+    col_dt = _find_col(base, ["DATA", "Data", "Data de competência", "Data de Competência", "Data de vencimento", "Data de confirmação"])
     col_plano = _find_col(base, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
     col_desc = _find_col(base, ["Descrição", "DESCRIÇÃO", "Descricao", "DESCRICAO"])
 
-    if col_tipo is None or col_val is None or col_dt is None:
+    if col_val is None or col_dt is None or col_plano is None:
         return None
 
-    base["_tipo"] = base[col_tipo].astype(str)
-    base["_tipo_norm"] = base["_tipo"].apply(_norm_txt)
+    tipo_df = read_sheet(dados_path, "TIPO", dados_sig)
+    if tipo_df is None:
+        return None
+
+    tipo_plano_col = _find_col(tipo_df, ["Plano de contas", "PLANO DE CONTAS", "Plano de Contas"])
+    tipo_col = _find_col(tipo_df, ["TIPO", "Tipo"])
+    if tipo_plano_col is None or tipo_col is None:
+        return None
+
+    mapa_tipo = tipo_df[[tipo_plano_col, tipo_col]].dropna(subset=[tipo_plano_col]).copy()
+    mapa_tipo["_plano_key"] = mapa_tipo[tipo_plano_col].apply(_norm_txt)
+    mapa_tipo["_tipo_map"] = mapa_tipo[tipo_col].astype(str).str.strip()
+    mapa_tipo = mapa_tipo[mapa_tipo["_plano_key"] != ""].drop_duplicates("_plano_key", keep="last")
 
     base["_dt"] = pd.to_datetime(base[col_dt], errors="coerce", dayfirst=True)
     base["_ano"] = base["_dt"].dt.year
     base["_mes"] = base["_dt"].dt.month
-
     base["_v"] = base[col_val].apply(to_num)
-
-    base["_plano"] = base[col_plano].astype(str).fillna("—") if col_plano is not None else "—"
+    base["_plano"] = base[col_plano].fillna("—").astype(str).str.strip()
     base["_plano_sint"] = base["_plano"].apply(sintetizar_plano_contas)
+    base["_plano_key"] = base["_plano"].apply(_norm_txt)
+    base["_desc"] = base[col_desc].fillna("—").astype(str).str.strip() if col_desc is not None else "—"
 
-    base["_desc"] = base[col_desc].astype(str).fillna("—") if col_desc is not None else "—"
-
+    base = base.merge(mapa_tipo[["_plano_key", "_tipo_map"]], on="_plano_key", how="left")
+    base["_tipo"] = base["_tipo_map"].fillna("").astype(str).str.strip()
+    base["_tipo_norm"] = base["_tipo"].apply(_norm_txt)
+    base["_tipo_pendente"] = base["_tipo_norm"] == ""
     return base
+
+
+def planos_sem_tipo(base: pd.DataFrame) -> pd.DataFrame:
+    if base is None or base.empty or "_tipo_pendente" not in base.columns:
+        return pd.DataFrame(columns=["PLANO DE CONTAS", "TIPO"])
+    pend = base[base["_tipo_pendente"] & (base["_plano_key"] != "")].copy()
+    if pend.empty:
+        return pd.DataFrame(columns=["PLANO DE CONTAS", "TIPO"])
+    out = pend[["_plano"]].drop_duplicates().sort_values("_plano")
+    out = out.rename(columns={"_plano": "PLANO DE CONTAS"})
+    out["TIPO"] = ""
+    return out.reset_index(drop=True)
 
 
 def agg_mes_ano_val(df: pd.DataFrame, value_candidates: List[str], ano_ref: int) -> Optional[Dict[int, float]]:
@@ -541,22 +621,22 @@ def render_drill(
 # Páginas
 # ----------------------------
 
-def page_dre(excel_path: str, sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
+def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
     st.title("DRE")
 
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
     meses_sel = [MES_PT_TO_NUM[m] for m in meses_pt]
 
-    xls = get_excel_file(excel_path, sig)
+    xls = get_excel_file(dados_path, dados_sig)
 
-    df_receita = read_sheet(excel_path, "RECEITA", sig)
-    df_cmv = read_sheet(excel_path, "CMV", sig)
-    base = prep_base(excel_path, sig)
+    df_receita = read_sheet(dados_path, "RECEITA", dados_sig)
+    df_cmv = read_sheet(dados_path, "CMV", dados_sig)
+    base = prep_base(plano_path, plano_sig, dados_path, dados_sig)
 
     missing = []
     if df_receita is None: missing.append("RECEITA")
     if df_cmv is None: missing.append("CMV")
-    if base is None: missing.append("BASE DE DADOS")
+    if base is None: missing.append("PLANO DE CONTAS / aba TIPO")
 
     if missing:
         st.error(f"Não consegui localizar abas essenciais: {', '.join(missing)}")
@@ -638,20 +718,20 @@ def page_dre(excel_path: str, sig: Tuple[int, int], ano_ref: int, meses_pt_sel: 
     )
 
 
-def page_dfc(excel_path: str, sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
+def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
     st.title("DFC")
 
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
     meses_sel = [MES_PT_TO_NUM[m] for m in meses_pt]
 
-    xls = get_excel_file(excel_path, sig)
+    xls = get_excel_file(dados_path, dados_sig)
 
-    df_receb = read_sheet(excel_path, "RECEBIMENTO", sig)
-    base = prep_base(excel_path, sig)
+    df_receb = read_sheet(dados_path, "RECEBIMENTO", dados_sig)
+    base = prep_base(plano_path, plano_sig, dados_path, dados_sig)
 
     missing = []
     if df_receb is None: missing.append("RECEBIMENTO")
-    if base is None: missing.append("BASE DE DADOS")
+    if base is None: missing.append("PLANO DE CONTAS / aba TIPO")
 
     if missing:
         st.error(f"Não consegui localizar abas essenciais: {', '.join(missing)}")
@@ -740,49 +820,67 @@ def page_dfc(excel_path: str, sig: Tuple[int, int], ano_ref: int, meses_pt_sel: 
 st.set_page_config(page_title="DRE & DFC — Financeiro", layout="wide")
 st.sidebar.title("Menu")
 
-excel_path = _auto_find_excel()
-if not excel_path:
-    st.sidebar.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na mesma pasta do app.")
+plano_path = find_plano_contas_file()
+dados_path = find_dados_externos_file()
+
+if not plano_path:
+    st.sidebar.error('Não encontrei o arquivo "PLANO DE CONTAS" (.xlsx/.xlsm/.xls) na pasta do app.')
+if not dados_path:
+    st.sidebar.error('Não encontrei o arquivo "DADOS EXTERNOS" (.xlsx/.xlsm/.xls) na pasta do app.')
+if not plano_path or not dados_path:
+    st.info('No GitHub, mantenha os dois arquivos na mesma pasta do PY e use nomes contendo "PLANO DE CONTAS" e "DADOS EXTERNOS".')
     st.stop()
 
-sig = excel_signature(excel_path)
-xls = get_excel_file(excel_path, sig)
+plano_sig = excel_signature(plano_path)
+dados_sig = excel_signature(dados_path)
+xls_plano = get_excel_file(plano_path, plano_sig)
+xls_dados = get_excel_file(dados_path, dados_sig)
 
-st.sidebar.caption(f"Excel: **{excel_path}**")
-st.sidebar.success("Excel carregado")
+st.sidebar.caption(f"Lançamentos: **{os.path.basename(plano_path)}**")
+st.sidebar.caption(f"Dados externos: **{os.path.basename(dados_path)}**")
+st.sidebar.success("Arquivos carregados")
 
-with st.sidebar.expander("Diagnóstico (abas detectadas)"):
-    st.write(xls.sheet_names)
+with st.sidebar.expander("Diagnóstico dos arquivos"):
+    st.write("Abas — PLANO DE CONTAS:", xls_plano.sheet_names)
+    st.write("Abas — DADOS EXTERNOS:", xls_dados.sheet_names)
 
-# filtros globais
+base_tmp = prep_base(plano_path, plano_sig, dados_path, dados_sig)
+if base_tmp is None:
+    st.error("Não foi possível montar a base. Confira se o arquivo PLANO DE CONTAS possui Data, Descrição, Plano de contas e Valor total; e se DADOS EXTERNOS possui a aba TIPO com Plano de contas e TIPO.")
+    st.stop()
+
+pendentes = planos_sem_tipo(base_tmp)
+if not pendentes.empty:
+    st.warning(f"Foram encontrados {len(pendentes)} plano(s) de contas sem TIPO vinculado na aba TIPO de DADOS EXTERNOS.")
+    st.dataframe(pendentes, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Baixar planos sem TIPO (CSV)",
+        data=pendentes.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
+        file_name="planos_de_contas_sem_tipo.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    st.caption("Preencha a coluna TIPO, copie as linhas para a aba TIPO de DADOS EXTERNOS e atualize o arquivo no repositório.")
+
 meses_pt_sel = st.sidebar.multiselect("Meses", options=MESES_PT, default=MESES_PT)
 
-# anos disponíveis: tenta nas abas RECEITA/CMV/RECEBIMENTO e na BASE
-anos = set()
-
-for sheet, val_cands in [("RECEITA", ["receita", "RECEITA", "Receita"]),
-                         ("CMV", ["CMV", "cmv"]),
-                         ("RECEBIMENTO", ["recebimento", "RECEBIMENTO", "Recebimento"])]:
-    df_tmp = read_sheet(excel_path, sheet, sig)
+anos = set(base_tmp["_ano"].dropna().astype(int).unique().tolist())
+for sheet in ["RECEITA", "CMV", "RECEBIMENTO"]:
+    df_tmp = read_sheet(dados_path, sheet, dados_sig)
     if df_tmp is not None:
         col_ano = _find_col(df_tmp, ["ANO", "Ano"])
         if col_ano is not None:
             anos |= set(pd.to_numeric(df_tmp[col_ano], errors="coerce").dropna().astype(int).unique().tolist())
 
-base_tmp = prep_base(excel_path, sig)
-if base_tmp is not None:
-    anos |= set(base_tmp["_ano"].dropna().astype(int).unique().tolist())
-
-anos = sorted(list(anos))
+anos = sorted(anos)
 if not anos:
-    st.sidebar.error("Não encontrei nenhum ANO válido no Excel (abas ou BASE).")
+    st.sidebar.error("Não encontrei nenhum ANO válido nos arquivos.")
     st.stop()
 
 ano_ref = st.sidebar.selectbox("Ano", options=anos, index=len(anos) - 1)
-
 pagina = st.sidebar.radio("Página", ["DRE", "DFC"])
 
 if pagina == "DRE":
-    page_dre(excel_path, sig, ano_ref, meses_pt_sel)
+    page_dre(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel)
 else:
-    page_dfc(excel_path, sig, ano_ref, meses_pt_sel)
+    page_dfc(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel)
