@@ -935,12 +935,38 @@ meses_default = [MES_NUM_TO_PT[m] for m in meses_base_ano if m in MES_NUM_TO_PT]
 if not meses_default:
     meses_default = MESES_PT
 
+# O Streamlit preserva o valor anterior do multiselect na sessão.
+# Quando o arquivo é trocado, ele pode continuar com JAN–JUN selecionados,
+# mesmo que a nova base contenha somente JUL. Nesse caso, redefinimos
+# automaticamente o filtro para os meses existentes na base.
+meses_key = f"meses_{ano_ref}"
+meses_sessao = st.session_state.get(meses_key, [])
+
+if meses_default != MESES_PT:
+    meses_validos_sessao = [
+        mes for mes in meses_sessao
+        if mes in meses_default
+    ]
+    if not meses_validos_sessao:
+        st.session_state[meses_key] = meses_default
+    elif set(meses_validos_sessao) != set(meses_sessao):
+        st.session_state[meses_key] = meses_validos_sessao
+
 meses_pt_sel = st.sidebar.multiselect(
     "Meses",
     options=MESES_PT,
     default=meses_default,
-    key=f"meses_{ano_ref}",
+    key=meses_key,
 )
+
+# Proteção adicional para impedir que a página use meses sem lançamentos
+# confirmados após a troca dos arquivos no repositório.
+if meses_default != MESES_PT and not set(meses_pt_sel).intersection(meses_default):
+    meses_pt_sel = meses_default
+    st.sidebar.warning(
+        "O filtro foi ajustado automaticamente para os meses que possuem "
+        f"lançamentos confirmados: {', '.join(meses_default)}."
+    )
 
 # Diagnóstico objetivo da base carregada.
 base_ano = base_tmp[base_tmp["_ano"] == int(ano_ref)].copy()
