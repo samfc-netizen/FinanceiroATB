@@ -37,6 +37,7 @@ import glob
 import os
 import re
 import unicodedata
+import html
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -478,27 +479,87 @@ def style_result_rows(df: pd.DataFrame, labels: List[str]) -> pd.io.formats.styl
 
 
 def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler, key: str):
-    """Renderiza DRE/DFC com a coluna de linha mais larga e colunas mensais compactas."""
-    column_config = {
-        "LINHA": st.column_config.TextColumn("CONTA / LINHA", width="large"),
-    }
-    for c in df.columns:
-        if c == "LINHA":
-            continue
-        if c in ("ACUMULADO", "%ACUMULADO"):
-            column_config[c] = st.column_config.Column(c, width="medium")
-        else:
-            column_config[c] = st.column_config.Column(c, width="small")
+    """Tabela financeira compacta, com cabeçalho agrupado por mês e rolagem horizontal."""
+    if df is None or df.empty:
+        st.info("Sem dados para exibir no período selecionado.")
+        return
 
-    height = min(520, max(260, 42 * (len(df) + 1)))
-    st.dataframe(
-        styler,
-        use_container_width=True,
-        height=height,
-        column_config=column_config,
-        key=key,
-    )
+    month_cols = []
+    for m in MESES_PT:
+        if m in df.columns:
+            month_cols.append(m)
 
+    result_labels = {str(v) for v in df["LINHA"].tolist() if str(v).startswith("RESULTADO")}
+    emphasis_labels = {"MARGEM DE CONTRIBUIÇÃO"}
+    base_labels = {"RECEITA", "RECEBIMENTOS"}
+
+    css = """
+    <style>
+      .fin-table-wrap{
+        width:100%; overflow-x:auto; border:1px solid #dfe5ec; border-radius:12px;
+        background:#fff; margin:4px 0 14px; box-shadow:0 1px 2px rgba(16,24,40,.04);
+      }
+      table.fin-table{border-collapse:separate;border-spacing:0;min-width:980px;width:100%;font-size:13px;color:#1f2937;}
+      .fin-table th,.fin-table td{padding:10px 10px;border-right:1px solid #edf1f5;border-bottom:1px solid #edf1f5;white-space:nowrap;}
+      .fin-table thead th{background:#f4f7fa;color:#334155;font-weight:700;text-align:center;position:sticky;top:0;z-index:2;}
+      .fin-table thead tr:first-child th{font-size:12px;letter-spacing:.02em;border-bottom:1px solid #d8e0e8;}
+      .fin-table .line-col{position:sticky;left:0;z-index:3;min-width:235px;max-width:280px;text-align:left;background:#fff;font-weight:700;color:#243447;}
+      .fin-table thead .line-col{background:#eef3f7;z-index:5;}
+      .fin-table td.num{text-align:right;min-width:112px;font-variant-numeric:tabular-nums;}
+      .fin-table td.pct{text-align:right;min-width:72px;color:#64748b;font-variant-numeric:tabular-nums;background:#fbfcfd;}
+      .fin-table th.acc,.fin-table td.acc{background:#f7fafc;font-weight:700;}
+      .fin-table tr.base-row td{font-weight:800;background:#eef6fb;color:#153a52;}
+      .fin-table tr.base-row .line-col{background:#eef6fb;}
+      .fin-table tr.emphasis-row td{font-weight:800;background:#f7f9fb;}
+      .fin-table tr.emphasis-row .line-col{background:#f7f9fb;}
+      .fin-table tr.result-row td{font-weight:900;background:#e9f1f8;border-top:2px solid #a9bdcf;color:#163b58;}
+      .fin-table tr.result-row .line-col{background:#e9f1f8;}
+      .fin-table tr:hover td{background:#f8fafc;}
+      .fin-table tr:hover .line-col{background:#f8fafc;}
+      .fin-table tr.result-row:hover td,.fin-table tr.result-row:hover .line-col{background:#e4eef6;}
+      .fin-table tr:last-child td{border-bottom:0;}
+      .fin-table th:last-child,.fin-table td:last-child{border-right:0;}
+      @media (max-width:700px){
+        table.fin-table{font-size:12px;min-width:900px;}
+        .fin-table th,.fin-table td{padding:9px 8px;}
+        .fin-table .line-col{min-width:195px;max-width:215px;}
+        .fin-table td.num{min-width:102px;}
+      }
+    </style>
+    """
+
+    parts = [css, '<div class="fin-table-wrap"><table class="fin-table">']
+    parts.append('<thead><tr>')
+    parts.append('<th class="line-col" rowspan="2">CONTA / LINHA</th>')
+    for m in month_cols:
+        parts.append(f'<th colspan="2">{html.escape(m)}</th>')
+    parts.append('<th class="acc" colspan="2">ACUMULADO</th>')
+    parts.append('</tr><tr>')
+    for _ in month_cols:
+        parts.append('<th>Valor</th><th>%</th>')
+    parts.append('<th class="acc">Valor</th><th class="acc">%</th>')
+    parts.append('</tr></thead><tbody>')
+
+    for _, row in df.iterrows():
+        label = str(row.get("LINHA", ""))
+        row_class = ""
+        if label in result_labels:
+            row_class = "result-row"
+        elif label in emphasis_labels:
+            row_class = "emphasis-row"
+        elif label in base_labels:
+            row_class = "base-row"
+        parts.append(f'<tr class="{row_class}">')
+        parts.append(f'<td class="line-col">{html.escape(label)}</td>')
+        for m in month_cols:
+            parts.append(f'<td class="num">R$ {format_brl(row.get(m, 0.0))}</td>')
+            parts.append(f'<td class="pct">{fmt_pct(row.get(m + "%", 0.0))}</td>')
+        parts.append(f'<td class="num acc">R$ {format_brl(row.get("ACUMULADO", 0.0))}</td>')
+        parts.append(f'<td class="pct acc">{fmt_pct(row.get("%ACUMULADO", 0.0))}</td>')
+        parts.append('</tr>')
+
+    parts.append('</tbody></table></div>')
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 def _period_months(start_month: int, end_month: int) -> List[int]:
     a, b = int(start_month), int(end_month)
@@ -524,6 +585,8 @@ def render_period_comparator(
     current_year: Optional[int] = None,
     current_months: Optional[List[int]] = None,
     expense_lines: Optional[List[str]] = None,
+    denom_map_for_year=None,
+    denom_label: str = "BASE",
 ):
     """Comparador livre: mesma linha entre dois meses, intervalos ou anos diferentes."""
     if not anos or not linhas_opt:
@@ -573,6 +636,17 @@ def render_period_comparator(
     delta = val_a - val_b
     delta_pct = (delta / abs(val_b) * 100.0) if val_b != 0 else (0.0 if val_a == 0 else None)
 
+    denom_a = 0.0
+    denom_b = 0.0
+    if denom_map_for_year is not None:
+        denom_map_a = denom_map_for_year(int(ano_a)) or {}
+        denom_map_b = denom_map_for_year(int(ano_b)) or {}
+        denom_a = float(sum(float(denom_map_a.get(m, 0.0)) for m in meses_a))
+        denom_b = float(sum(float(denom_map_b.get(m, 0.0)) for m in meses_b))
+    share_a = (val_a / denom_a * 100.0) if denom_a != 0 else None
+    share_b = (val_b / denom_b * 100.0) if denom_b != 0 else None
+    share_delta_pp = (share_a - share_b) if share_a is not None and share_b is not None else None
+
     label_a = _period_label(int(ano_a), meses_a)
     label_b = _period_label(int(ano_b), meses_b)
     inverse = linha in set(expense_lines or [])
@@ -584,6 +658,20 @@ def render_period_comparator(
     k3.metric("Variação em R$", f"R$ {format_brl(delta)}", delta=f"R$ {format_brl(delta)}", delta_color=delta_color)
     pct_txt = "Sem base comparável" if delta_pct is None else fmt_pct(delta_pct)
     k4.metric("Variação percentual", pct_txt, delta=(None if delta_pct is None else fmt_pct(delta_pct)), delta_color=delta_color)
+
+    st.markdown(f"**Representatividade sobre {denom_label}**")
+    r1, r2, r3 = st.columns(3)
+    share_a_txt = "Sem base" if share_a is None else fmt_pct(share_a)
+    share_b_txt = "Sem base" if share_b is None else fmt_pct(share_b)
+    share_delta_txt = "Sem base" if share_delta_pp is None else f"{share_delta_pp:+.2f} p.p.".replace(".", ",")
+    r1.metric(f"Período A · {label_a}", share_a_txt)
+    r2.metric(f"Período B · {label_b}", share_b_txt)
+    r3.metric("Variação de participação", share_delta_txt,
+              delta=(None if share_delta_pp is None else f"{share_delta_pp:+.2f} p.p.".replace(".", ",")),
+              delta_color=delta_color)
+    st.caption(
+        f"Indica quanto a linha selecionada representa sobre o total de {denom_label.lower()} em cada período."
+    )
 
     comp_df = pd.DataFrame({
         "PERÍODO": [label_b, label_a],
@@ -867,7 +955,7 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     ]
 
     st.subheader("Visão mensal e acumulada")
-    st.caption("A primeira coluna identifica a linha; os meses ficam compactos e o acumulado permanece destacado ao final.")
+    st.caption("Valores e percentuais estão agrupados por mês; a coluna da conta permanece fixa durante a rolagem horizontal.")
     dre_tbl = build_table(linhas, meses_sel, denom_by_month=receita_by_month)
     render_financial_table(dre_tbl, style_result_row(dre_tbl, "RESULTADO OPERACIONAL"), key="dre_main_table")
 
@@ -881,6 +969,8 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         current_year=ano_ref,
         current_months=meses_sel,
         expense_lines=["CMV", "DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL"],
+        denom_map_for_year=lambda ano: dre_line_map_for_year(ano).get("RECEITA", {}),
+        denom_label="RECEITA",
     )
 
     st.divider()
@@ -1006,7 +1096,7 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     ]
 
     st.subheader("Visão mensal e acumulada")
-    st.caption("A primeira coluna identifica a linha; os meses ficam compactos e o acumulado permanece destacado ao final.")
+    st.caption("Valores e percentuais estão agrupados por mês; a coluna da conta permanece fixa durante a rolagem horizontal.")
     dfc_tbl = build_table(linhas, meses_sel, denom_by_month=receb_by_month)
     render_financial_table(
         dfc_tbl,
@@ -1024,6 +1114,8 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         current_year=ano_ref,
         current_months=meses_sel,
         expense_lines=["DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"],
+        denom_map_for_year=lambda ano: dfc_line_map_for_year(ano).get("RECEBIMENTOS", {}),
+        denom_label="RECEBIMENTOS",
     )
 
     st.divider()
