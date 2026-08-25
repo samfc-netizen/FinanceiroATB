@@ -477,6 +477,141 @@ def style_result_rows(df: pd.DataFrame, labels: List[str]) -> pd.io.formats.styl
     return df.style.format(fmt).apply(_style, axis=1).hide(axis="index")
 
 
+def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler, key: str):
+    """Renderiza DRE/DFC com a coluna de linha mais larga e colunas mensais compactas."""
+    column_config = {
+        "LINHA": st.column_config.TextColumn("CONTA / LINHA", width="large"),
+    }
+    for c in df.columns:
+        if c == "LINHA":
+            continue
+        if c in ("ACUMULADO", "%ACUMULADO"):
+            column_config[c] = st.column_config.Column(c, width="medium")
+        else:
+            column_config[c] = st.column_config.Column(c, width="small")
+
+    height = min(520, max(260, 42 * (len(df) + 1)))
+    st.dataframe(
+        styler,
+        use_container_width=True,
+        height=height,
+        column_config=column_config,
+        key=key,
+    )
+
+
+def _period_months(start_month: int, end_month: int) -> List[int]:
+    a, b = int(start_month), int(end_month)
+    if a <= b:
+        return list(range(a, b + 1))
+    return list(range(b, a + 1))
+
+
+def _period_label(year: int, months: List[int]) -> str:
+    if not months:
+        return str(year)
+    if len(months) == 1:
+        return f"{MES_NUM_TO_PT[months[0]]}/{year}"
+    return f"{MES_NUM_TO_PT[months[0]]}–{MES_NUM_TO_PT[months[-1]]}/{year}"
+
+
+def render_period_comparator(
+    anos: List[int],
+    linhas_opt: List[str],
+    line_map_for_year,
+    ui_key_prefix: str,
+    default_line: Optional[str] = None,
+    current_year: Optional[int] = None,
+    current_months: Optional[List[int]] = None,
+    expense_lines: Optional[List[str]] = None,
+):
+    """Comparador livre: mesma linha entre dois meses, intervalos ou anos diferentes."""
+    if not anos or not linhas_opt:
+        return
+
+    st.markdown("#### Comparador de períodos")
+    st.caption("Escolha uma linha e compare qualquer mês ou intervalo entre anos diferentes.")
+
+    default_idx = linhas_opt.index(default_line) if default_line in linhas_opt else 0
+    linha = st.selectbox(
+        "Linha para comparar",
+        options=linhas_opt,
+        index=default_idx,
+        key=f"{ui_key_prefix}_cmp_linha",
+    )
+
+    current_year = int(current_year if current_year in anos else anos[-1])
+    cur_months = sorted(current_months or [])
+    default_start = cur_months[0] if cur_months else 1
+    default_end = cur_months[-1] if cur_months else 12
+
+    idx_year_a = anos.index(current_year)
+    previous_year = max([a for a in anos if a < current_year], default=current_year)
+    idx_year_b = anos.index(previous_year)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("**Período A**")
+        a1, a2, a3 = st.columns([1.05, 1, 1])
+        ano_a = a1.selectbox("Ano", anos, index=idx_year_a, key=f"{ui_key_prefix}_cmp_ano_a")
+        mes_a_ini = a2.selectbox("De", list(range(1, 13)), index=default_start - 1, format_func=lambda m: MES_NUM_TO_PT[m], key=f"{ui_key_prefix}_cmp_mes_a_ini")
+        mes_a_fim = a3.selectbox("Até", list(range(1, 13)), index=default_end - 1, format_func=lambda m: MES_NUM_TO_PT[m], key=f"{ui_key_prefix}_cmp_mes_a_fim")
+
+    with right:
+        st.markdown("**Período B**")
+        b1, b2, b3 = st.columns([1.05, 1, 1])
+        ano_b = b1.selectbox("Ano", anos, index=idx_year_b, key=f"{ui_key_prefix}_cmp_ano_b")
+        mes_b_ini = b2.selectbox("De", list(range(1, 13)), index=default_start - 1, format_func=lambda m: MES_NUM_TO_PT[m], key=f"{ui_key_prefix}_cmp_mes_b_ini")
+        mes_b_fim = b3.selectbox("Até", list(range(1, 13)), index=default_end - 1, format_func=lambda m: MES_NUM_TO_PT[m], key=f"{ui_key_prefix}_cmp_mes_b_fim")
+
+    meses_a = _period_months(mes_a_ini, mes_a_fim)
+    meses_b = _period_months(mes_b_ini, mes_b_fim)
+    map_a = line_map_for_year(int(ano_a)).get(linha, {})
+    map_b = line_map_for_year(int(ano_b)).get(linha, {})
+    val_a = float(sum(float(map_a.get(m, 0.0)) for m in meses_a))
+    val_b = float(sum(float(map_b.get(m, 0.0)) for m in meses_b))
+    delta = val_a - val_b
+    delta_pct = (delta / abs(val_b) * 100.0) if val_b != 0 else (0.0 if val_a == 0 else None)
+
+    label_a = _period_label(int(ano_a), meses_a)
+    label_b = _period_label(int(ano_b), meses_b)
+    inverse = linha in set(expense_lines or [])
+    delta_color = "inverse" if inverse else "normal"
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"Período A · {label_a}", f"R$ {format_brl(val_a)}")
+    k2.metric(f"Período B · {label_b}", f"R$ {format_brl(val_b)}")
+    k3.metric("Variação em R$", f"R$ {format_brl(delta)}", delta=f"R$ {format_brl(delta)}", delta_color=delta_color)
+    pct_txt = "Sem base comparável" if delta_pct is None else fmt_pct(delta_pct)
+    k4.metric("Variação percentual", pct_txt, delta=(None if delta_pct is None else fmt_pct(delta_pct)), delta_color=delta_color)
+
+    comp_df = pd.DataFrame({
+        "PERÍODO": [label_b, label_a],
+        "VALOR": [val_b, val_a],
+    })
+    fig = px.bar(
+        comp_df,
+        x="PERÍODO",
+        y="VALOR",
+        text_auto=".3s",
+        title=f"{linha} — comparação dos períodos",
+    )
+    fig.update_layout(
+        height=330,
+        margin=dict(l=10, r=10, t=55, b=10),
+        yaxis_title="Valor (R$)",
+        xaxis_title=None,
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"{ui_key_prefix}_cmp_chart")
+
+    st.caption(
+        "Variação = Período A − Período B. Para linhas de despesa, aumento é sinalizado como desfavorável; redução, como favorável."
+        if inverse else
+        "Variação = Período A − Período B."
+    )
+
+
 # ----------------------------
 # Drill (comum DRE / DFC)
 # ----------------------------
@@ -641,7 +776,7 @@ def render_drill(
 # Páginas
 # ----------------------------
 
-def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
+def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str], anos_disponiveis: List[int]):
     st.title("DRE")
 
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
@@ -677,28 +812,38 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         st.write("Abas detectadas no Excel:", xls.sheet_names)
         st.stop()
 
-    receita_by_month = agg_mes_ano_val(df_receita, ["receita", "RECEITA", "Receita"], ano_ref)
-    cmv_by_month = agg_mes_ano_val(df_cmv, ["CMV", "cmv"], ano_ref)
+    def dre_line_map_for_year(ano: int) -> Dict[str, Dict[int, float]]:
+        receita = agg_mes_ano_val(df_receita, ["receita", "RECEITA", "Receita"], ano)
+        cmv = agg_mes_ano_val(df_cmv, ["CMV", "cmv"], ano)
+        receita = receita or {m: 0.0 for m in range(1, 13)}
+        cmv = cmv or {m: 0.0 for m in range(1, 13)}
+        margem = {m: float(receita.get(m, 0.0)) - float(cmv.get(m, 0.0)) for m in range(1, 13)}
+        pessoal_y = sum_base_by_month(base, ano, "DESPESA C/ PESSOAL")
+        financeira_y = sum_base_by_month(base, ano, "FINANCEIRA")
+        impostos_y = sum_base_by_month(base, ano, "IMPOSTOS")
+        operacional_y = sum_base_by_month(base, ano, "OPERACIONAL")
+        despesas = {m: float(pessoal_y.get(m, 0.0)) + float(financeira_y.get(m, 0.0)) + float(impostos_y.get(m, 0.0)) + float(operacional_y.get(m, 0.0)) for m in range(1, 13)}
+        resultado = {m: float(margem.get(m, 0.0)) - float(despesas.get(m, 0.0)) for m in range(1, 13)}
+        return {
+            "RECEITA": receita,
+            "CMV": cmv,
+            "MARGEM DE CONTRIBUIÇÃO": margem,
+            "DESPESA C/ PESSOAL": pessoal_y,
+            "FINANCEIRA": financeira_y,
+            "IMPOSTOS": impostos_y,
+            "OPERACIONAL": operacional_y,
+            "RESULTADO OPERACIONAL": resultado,
+        }
 
-    if receita_by_month is None:
-        st.error("Aba RECEITA: preciso de colunas (mês, ano, receita).")
-        st.write("Colunas encontradas:", list(df_receita.columns))
-        st.stop()
-
-    if cmv_by_month is None:
-        st.error("Aba CMV: preciso de colunas (mês, ano, CMV).")
-        st.write("Colunas encontradas:", list(df_cmv.columns))
-        st.stop()
-
-    margem_by_month = {m: float(receita_by_month.get(m, 0.0)) - float(cmv_by_month.get(m, 0.0)) for m in range(1, 13)}
-
-    pessoal = sum_base_by_month(base, ano_ref, "DESPESA C/ PESSOAL")
-    financeira = sum_base_by_month(base, ano_ref, "FINANCEIRA")
-    impostos = sum_base_by_month(base, ano_ref, "IMPOSTOS")
-    operacional = sum_base_by_month(base, ano_ref, "OPERACIONAL")
-
-    despesas_total = {m: float(pessoal.get(m, 0.0)) + float(financeira.get(m, 0.0)) + float(impostos.get(m, 0.0)) + float(operacional.get(m, 0.0)) for m in range(1, 13)}
-    resultado_operacional = {m: float(margem_by_month.get(m, 0.0)) - float(despesas_total.get(m, 0.0)) for m in range(1, 13)}
+    current_map = dre_line_map_for_year(ano_ref)
+    receita_by_month = current_map["RECEITA"]
+    cmv_by_month = current_map["CMV"]
+    margem_by_month = current_map["MARGEM DE CONTRIBUIÇÃO"]
+    pessoal = current_map["DESPESA C/ PESSOAL"]
+    financeira = current_map["FINANCEIRA"]
+    impostos = current_map["IMPOSTOS"]
+    operacional = current_map["OPERACIONAL"]
+    resultado_operacional = current_map["RESULTADO OPERACIONAL"]
 
 
     # Cards topo
@@ -721,9 +866,22 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         ("RESULTADO OPERACIONAL", resultado_operacional),
     ]
 
-    st.subheader("Tabela (JAN | JAN% | ...)")
+    st.subheader("Visão mensal e acumulada")
+    st.caption("A primeira coluna identifica a linha; os meses ficam compactos e o acumulado permanece destacado ao final.")
     dre_tbl = build_table(linhas, meses_sel, denom_by_month=receita_by_month)
-    st.dataframe(style_result_row(dre_tbl, "RESULTADO OPERACIONAL"), use_container_width=True)
+    render_financial_table(dre_tbl, style_result_row(dre_tbl, "RESULTADO OPERACIONAL"), key="dre_main_table")
+
+    st.divider()
+    render_period_comparator(
+        anos=anos_disponiveis,
+        linhas_opt=[nome for nome, _ in linhas],
+        line_map_for_year=dre_line_map_for_year,
+        ui_key_prefix="dre",
+        default_line="OPERACIONAL",
+        current_year=ano_ref,
+        current_months=meses_sel,
+        expense_lines=["CMV", "DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL"],
+    )
 
     st.divider()
     st.subheader("Drill — detalhamento (BASE DE DADOS)")
@@ -752,7 +910,7 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     )
 
 
-def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str]):
+def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados_sig: Tuple[int, int], ano_ref: int, meses_pt_sel: List[str], anos_disponiveis: List[int]):
     st.title("DFC")
 
     meses_pt = meses_pt_sel if meses_pt_sel else MESES_PT
@@ -786,23 +944,40 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         st.write("Abas detectadas no Excel:", xls.sheet_names)
         st.stop()
 
-    receb_by_month = agg_mes_ano_val(df_receb, ["recebimento", "RECEBIMENTO", "Recebimento"], ano_ref)
-    if receb_by_month is None:
-        st.error("Aba RECEBIMENTO: preciso de colunas (mês, ano, recebimento).")
-        st.write("Colunas encontradas:", list(df_receb.columns))
-        st.stop()
+    def dfc_line_map_for_year(ano: int) -> Dict[str, Dict[int, float]]:
+        receb = agg_mes_ano_val(df_receb, ["recebimento", "RECEBIMENTO", "Recebimento"], ano)
+        receb = receb or {m: 0.0 for m in range(1, 13)}
+        pessoal_y = sum_base_by_month(base, ano, "DESPESA C/ PESSOAL")
+        financeira_y = sum_base_by_month(base, ano, "FINANCEIRA")
+        impostos_y = sum_base_by_month(base, ano, "IMPOSTOS")
+        operacional_y = sum_base_by_month(base, ano, "OPERACIONAL")
+        emprestimos_y = sum_base_by_month(base, ano, "EMPRÉSTIMOS")
+        fornecedor_y = sum_base_by_month(base, ano, "FORNECEDOR")
+        saidas = {m: float(pessoal_y.get(m, 0.0)) + float(financeira_y.get(m, 0.0)) + float(impostos_y.get(m, 0.0)) + float(operacional_y.get(m, 0.0)) + float(emprestimos_y.get(m, 0.0)) + float(fornecedor_y.get(m, 0.0)) for m in range(1, 13)}
+        resultado = {m: float(receb.get(m, 0.0)) - float(saidas.get(m, 0.0)) for m in range(1, 13)}
+        antes_emp = {m: float(resultado.get(m, 0.0)) + float(emprestimos_y.get(m, 0.0)) for m in range(1, 13)}
+        return {
+            "RECEBIMENTOS": receb,
+            "DESPESA C/ PESSOAL": pessoal_y,
+            "FINANCEIRA": financeira_y,
+            "IMPOSTOS": impostos_y,
+            "OPERACIONAL": operacional_y,
+            "FORNECEDOR": fornecedor_y,
+            "EMPRÉSTIMOS": emprestimos_y,
+            "RESULTADO ANTES DOS EMPRÉSTIMOS": antes_emp,
+            "RESULTADO CAIXA": resultado,
+        }
 
-    pessoal = sum_base_by_month(base, ano_ref, "DESPESA C/ PESSOAL")
-    financeira = sum_base_by_month(base, ano_ref, "FINANCEIRA")
-    impostos = sum_base_by_month(base, ano_ref, "IMPOSTOS")
-    operacional = sum_base_by_month(base, ano_ref, "OPERACIONAL")
-    emprestimos = sum_base_by_month(base, ano_ref, "EMPRÉSTIMOS")
-    fornecedor = sum_base_by_month(base, ano_ref, "FORNECEDOR")
-
-    # Resultado Caixa (inclui empréstimos nas despesas, conforme pedido)
-    saidas_total = {m: float(pessoal.get(m, 0.0)) + float(financeira.get(m, 0.0)) + float(impostos.get(m, 0.0)) + float(operacional.get(m, 0.0)) + float(emprestimos.get(m, 0.0)) + float(fornecedor.get(m, 0.0)) for m in range(1, 13)}
-    resultado_caixa = {m: float(receb_by_month.get(m, 0.0)) - float(saidas_total.get(m, 0.0)) for m in range(1, 13)}
-    resultado_antes_emprest = {m: float(resultado_caixa.get(m, 0.0)) + float(emprestimos.get(m, 0.0)) for m in range(1, 13)}
+    current_map = dfc_line_map_for_year(ano_ref)
+    receb_by_month = current_map["RECEBIMENTOS"]
+    pessoal = current_map["DESPESA C/ PESSOAL"]
+    financeira = current_map["FINANCEIRA"]
+    impostos = current_map["IMPOSTOS"]
+    operacional = current_map["OPERACIONAL"]
+    fornecedor = current_map["FORNECEDOR"]
+    emprestimos = current_map["EMPRÉSTIMOS"]
+    resultado_antes_emprest = current_map["RESULTADO ANTES DOS EMPRÉSTIMOS"]
+    resultado_caixa = current_map["RESULTADO CAIXA"]
 
 
     # Cards topo
@@ -830,9 +1005,26 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         ("RESULTADO CAIXA", resultado_caixa),
     ]
 
-    st.subheader("Tabela (JAN | JAN% | ...)")
+    st.subheader("Visão mensal e acumulada")
+    st.caption("A primeira coluna identifica a linha; os meses ficam compactos e o acumulado permanece destacado ao final.")
     dfc_tbl = build_table(linhas, meses_sel, denom_by_month=receb_by_month)
-    st.dataframe(style_result_rows(dfc_tbl, ["RESULTADO ANTES DOS EMPRÉSTIMOS", "RESULTADO CAIXA"]), use_container_width=True)
+    render_financial_table(
+        dfc_tbl,
+        style_result_rows(dfc_tbl, ["RESULTADO ANTES DOS EMPRÉSTIMOS", "RESULTADO CAIXA"]),
+        key="dfc_main_table",
+    )
+
+    st.divider()
+    render_period_comparator(
+        anos=anos_disponiveis,
+        linhas_opt=[nome for nome, _ in linhas],
+        line_map_for_year=dfc_line_map_for_year,
+        ui_key_prefix="dfc",
+        default_line="OPERACIONAL",
+        current_year=ano_ref,
+        current_months=meses_sel,
+        expense_lines=["DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"],
+    )
 
     st.divider()
     st.subheader("Drill — detalhamento (BASE DE DADOS)")
@@ -866,6 +1058,21 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
 # ----------------------------
 
 st.set_page_config(page_title="DRE & DFC — Financeiro", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 1.5rem; padding-bottom: 2.5rem; max-width: 1500px;}
+    div[data-testid="stMetric"] {border: 1px solid rgba(120,120,120,.18); border-radius: 12px; padding: 12px 14px;}
+    div[data-testid="stDataFrame"] {border: 1px solid rgba(120,120,120,.16); border-radius: 12px; overflow: hidden;}
+    div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stDataFrame"]) {min-width: 0;}
+    h1 {letter-spacing: -.02em;}
+    h3, h4 {letter-spacing: -.01em;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.sidebar.title("Menu")
 
 plano_path = find_plano_contas_file()
@@ -986,6 +1193,6 @@ if not base_ano.empty:
 pagina = st.sidebar.radio("Página", ["DRE", "DFC"])
 
 if pagina == "DRE":
-    page_dre(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel)
+    page_dre(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel, anos)
 else:
-    page_dfc(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel)
+    page_dfc(plano_path, plano_sig, dados_path, dados_sig, ano_ref, meses_pt_sel, anos)
