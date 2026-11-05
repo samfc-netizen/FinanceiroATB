@@ -552,10 +552,18 @@ def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler,
         parts.append(f'<tr class="{row_class}">')
         parts.append(f'<td class="line-col">{html.escape(label)}</td>')
         for m in month_cols:
-            parts.append(f'<td class="num">R$ {format_brl(row.get(m, 0.0))}</td>')
-            parts.append(f'<td class="pct">{fmt_pct(row.get(m + "%", 0.0))}</td>')
-        parts.append(f'<td class="num acc">R$ {format_brl(row.get("ACUMULADO", 0.0))}</td>')
-        parts.append(f'<td class="pct acc">{fmt_pct(row.get("%ACUMULADO", 0.0))}</td>')
+            valor = float(row.get(m, 0.0))
+            percentual = float(row.get(m + "%", 0.0))
+            classe_valor = " negative" if row_class == "result-row" and valor < 0 else ""
+            classe_pct = " negative" if row_class == "result-row" and percentual < 0 else ""
+            parts.append(f'<td class="num{classe_valor}">R$ {format_brl(valor)}</td>')
+            parts.append(f'<td class="pct{classe_pct}">{fmt_pct(percentual)}</td>')
+        acumulado = float(row.get("ACUMULADO", 0.0))
+        percentual_acumulado = float(row.get("%ACUMULADO", 0.0))
+        classe_acum = " negative" if row_class == "result-row" and acumulado < 0 else ""
+        classe_pct_acum = " negative" if row_class == "result-row" and percentual_acumulado < 0 else ""
+        parts.append(f'<td class="num acc{classe_acum}">R$ {format_brl(acumulado)}</td>')
+        parts.append(f'<td class="pct acc{classe_pct_acum}">{fmt_pct(percentual_acumulado)}</td>')
         parts.append('</tr>')
 
     parts.append('</tbody></table></div>')
