@@ -101,6 +101,8 @@ def format_brl(x) -> str:
 
 def fmt_pct(x) -> str:
     try:
+        if pd.isna(x):
+            return "—"
         return f"{float(x):,.2f}%".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return "0,00%"
@@ -478,7 +480,7 @@ def style_result_rows(df: pd.DataFrame, labels: List[str]) -> pd.io.formats.styl
     return df.style.format(fmt).apply(_style, axis=1).hide(axis="index")
 
 
-def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler, key: str):
+def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler, key: str, compare_expenses: bool = False):
     """Tabela financeira compacta, com cabeçalho agrupado por mês e rolagem horizontal."""
     if df is None or df.empty:
         st.info("Sem dados para exibir no período selecionado.")
@@ -505,6 +507,8 @@ def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler,
       .fin-table thead tr:first-child th{font-size:12px;letter-spacing:.02em;border-bottom:1px solid #d8e0e8;}
       .fin-table .line-col{position:sticky;left:0;z-index:3;min-width:235px;max-width:280px;text-align:left;background:#fff;font-weight:700;color:#243447;}
       .fin-table thead .line-col{background:#eef3f7;z-index:5;}
+      .fin-table td.num.up{color:#b91c1c;background:#fff1f2;}
+      .fin-table td.num.down{color:#15803d;background:#f0fdf4;}
       .fin-table td.num{text-align:right;min-width:112px;font-variant-numeric:tabular-nums;}
       .fin-table td.pct{text-align:right;min-width:72px;color:#64748b;font-variant-numeric:tabular-nums;background:#fbfcfd;}
       .fin-table th.acc,.fin-table td.acc{background:#f7fafc;font-weight:700;}
@@ -543,7 +547,7 @@ def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler,
     for _, row in df.iterrows():
         label = str(row.get("LINHA", ""))
         row_class = ""
-        if label in result_labels:
+        if label in result_labels or (compare_expenses and label == "TOTAL DA CONTA"):
             row_class = "result-row"
         elif label in emphasis_labels:
             row_class = "emphasis-row"
@@ -551,12 +555,22 @@ def render_financial_table(df: pd.DataFrame, styler: pd.io.formats.style.Styler,
             row_class = "base-row"
         parts.append(f'<tr class="{row_class}">')
         parts.append(f'<td class="line-col">{html.escape(label)}</td>')
+        previous = None
         for m in month_cols:
             valor = float(row.get(m, 0.0))
             percentual = float(row.get(m + "%", 0.0))
             classe_valor = " negative" if row_class == "result-row" and valor < 0 else ""
             classe_pct = " negative" if row_class == "result-row" and percentual < 0 else ""
-            parts.append(f'<td class="num{classe_valor}">R$ {format_brl(valor)}</td>')
+            arrow = ""
+            if compare_expenses and previous is not None and abs(valor - previous) > 0.005:
+                delta = valor - previous
+                classe_valor += " up" if delta > 0 else " down"
+                arrow = " ▲" if delta > 0 else " ▼"
+                tooltip = f' title="Variação: R$ {format_brl(delta)}"'
+            else:
+                tooltip = ""
+            previous = valor
+            parts.append(f'<td class="num{classe_valor}"{tooltip}>R$ {format_brl(valor)}{arrow}</td>')
             parts.append(f'<td class="pct{classe_pct}">{fmt_pct(percentual)}</td>')
         acumulado = float(row.get("ACUMULADO", 0.0))
         percentual_acumulado = float(row.get("%ACUMULADO", 0.0))
@@ -712,6 +726,49 @@ def render_period_comparator(
 # Drill (comum DRE / DFC)
 # ----------------------------
 
+def build_monthly_drill(base, ano_ref, meses_sel, linha_tipo, linha_by_month):
+    meses = sorted(set(meses_sel))
+    filtered = filter_base(base, ano_ref, meses, linha_tipo)
+    grouped = filtered.groupby(["_plano_sint", "_mes"], dropna=False)["_v"].sum()
+    plans = {}
+    for (plan, month), value in grouped.items():
+        plans.setdefault(str(plan), {})[int(month)] = float(value)
+    differences = {m: float(linha_by_month.get(m, 0)) - sum(v.get(m, 0) for v in plans.values()) for m in meses}
+    if any(abs(v) > 0.005 for v in differences.values()):
+        label = "SEM DETALHAMENTO NA BASE" if not plans else "DIFERENÇA NÃO CLASSIFICADA"
+        plans[label] = differences
+    ordered = sorted(plans.items(), key=lambda item: sum(item[1].values()), reverse=True)
+    ordered.append(("TOTAL DA CONTA", linha_by_month))
+    return build_table(ordered, meses, linha_by_month)
+
+
+def render_monthly_drill(base, ano_ref, meses_sel, linha_tipo, linha_by_month, ui_key_prefix):
+    st.markdown("#### Composição mensal por plano de contas")
+    st.caption("% = participação no total da conta de resultado do próprio mês. O acumulado usa os totais do período. Quando o total é zero, o percentual é exibido como —.")
+    tbl = build_monthly_drill(base, ano_ref, meses_sel, linha_tipo, linha_by_month)
+    for m in meses_sel:
+        if not linha_by_month.get(m, 0):
+            tbl[MES_NUM_TO_PT[m] + "%"] = float("nan")
+    if not sum(linha_by_month.get(m, 0) for m in meses_sel):
+        tbl["%ACUMULADO"] = float("nan")
+    render_financial_table(tbl, None, key=f"{ui_key_prefix}_monthly", compare_expenses=True)
+    st.caption("▲ Aumento da despesa · ▼ Redução da despesa · comparação com o mês anterior exibido. Passe o mouse sobre o valor para ver a diferença em reais.")
+    months = sorted(set(meses_sel))
+    if len(months) > 1:
+        month = st.selectbox("Mês para analisar oscilações", months[1:], index=len(months)-2, format_func=lambda m: MES_NUM_TO_PT[m], key=f"{ui_key_prefix}_variation_month")
+        prev = months[months.index(month)-1]
+        a, b = MES_NUM_TO_PT[prev], MES_NUM_TO_PT[month]
+        variation = tbl.loc[tbl["LINHA"] != "TOTAL DA CONTA", ["LINHA", a, b]].copy()
+        variation["VARIAÇÃO R$"] = variation[b] - variation[a]
+        variation["VARIAÇÃO %"] = [((y-x)/abs(x)*100) if x else (0.0 if not y else float("nan")) for x,y in zip(variation[a], variation[b])]
+        variation = variation.loc[variation["VARIAÇÃO R$"].abs() > 0.005].sort_values("VARIAÇÃO R$", key=lambda x: x.abs(), ascending=False)
+        if variation.empty:
+            st.info("Nenhuma oscilação entre os meses comparados.")
+        else:
+            st.dataframe(variation.rename(columns={"LINHA":"PLANO DE CONTAS"}).style.format({a: lambda x: f"R$ {format_brl(x)}", b: lambda x: f"R$ {format_brl(x)}", "VARIAÇÃO R$": lambda x: f"R$ {format_brl(x)}", "VARIAÇÃO %": lambda x: "—" if pd.isna(x) else fmt_pct(x)}).applymap(lambda x: "color:#b91c1c" if x>0 else "color:#15803d" if x<0 else "", subset=["VARIAÇÃO R$"]), hide_index=True, use_container_width=True)
+            st.caption("Variação percentual sem base anterior é exibida como —.")
+
+
 def render_drill(
     base: pd.DataFrame,
     ano_ref: int,
@@ -736,6 +793,8 @@ def render_drill(
           * % do plano sobre a própria linha (representatividade na despesa/linha)
     """
 
+    render_monthly_drill(base, ano_ref, meses_sel, linha_tipo, linha_by_month, ui_key_prefix)
+    st.markdown("#### Lançamentos e composição do período")
     c1, c2 = st.columns([2, 1])
     with c1:
         mes_opt = ["TODOS"] + (meses_pt_sel if meses_pt_sel else MESES_PT)
@@ -968,25 +1027,11 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     render_financial_table(dre_tbl, style_result_row(dre_tbl, "RESULTADO OPERACIONAL"), key="dre_main_table")
 
     st.divider()
-    render_period_comparator(
-        anos=anos_disponiveis,
-        linhas_opt=[nome for nome, _ in linhas],
-        line_map_for_year=dre_line_map_for_year,
-        ui_key_prefix="dre",
-        default_line="OPERACIONAL",
-        current_year=ano_ref,
-        current_months=meses_sel,
-        expense_lines=["CMV", "DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL"],
-        denom_map_for_year=lambda ano: dre_line_map_for_year(ano).get("RECEITA", {}),
-        denom_label="RECEITA",
-    )
-
-    st.divider()
-    st.subheader("Drill — detalhamento (BASE DE DADOS)")
+    st.subheader("Detalhamento das despesas")
 
     linhas_map = {nome: by_month for (nome, by_month) in linhas}
-    linhas_opt = list(linhas_map.keys())
-    default_idx = linhas_opt.index("OPERACIONAL") if "OPERACIONAL" in linhas_opt else 0
+    linhas_opt = [nome for nome in linhas_map if nome in {"DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"}]
+    default_idx = 0
 
     linha_sel = st.selectbox(
         "Selecione a linha para detalhar",
@@ -1005,6 +1050,20 @@ def page_dre(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         denom_label="RECEITA",
         denom_by_month=receita_by_month,
         ui_key_prefix="dre",
+    )
+
+    st.divider()
+    render_period_comparator(
+        anos=anos_disponiveis,
+        linhas_opt=[nome for nome, _ in linhas],
+        line_map_for_year=dre_line_map_for_year,
+        ui_key_prefix="dre",
+        default_line="OPERACIONAL",
+        current_year=ano_ref,
+        current_months=meses_sel,
+        expense_lines=["CMV", "DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL"],
+        denom_map_for_year=lambda ano: dre_line_map_for_year(ano).get("RECEITA", {}),
+        denom_label="RECEITA",
     )
 
 
@@ -1113,25 +1172,11 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
     )
 
     st.divider()
-    render_period_comparator(
-        anos=anos_disponiveis,
-        linhas_opt=[nome for nome, _ in linhas],
-        line_map_for_year=dfc_line_map_for_year,
-        ui_key_prefix="dfc",
-        default_line="OPERACIONAL",
-        current_year=ano_ref,
-        current_months=meses_sel,
-        expense_lines=["DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"],
-        denom_map_for_year=lambda ano: dfc_line_map_for_year(ano).get("RECEBIMENTOS", {}),
-        denom_label="RECEBIMENTOS",
-    )
-
-    st.divider()
-    st.subheader("Drill — detalhamento (BASE DE DADOS)")
+    st.subheader("Detalhamento das despesas")
 
     linhas_map = {nome: by_month for (nome, by_month) in linhas}
-    linhas_opt = list(linhas_map.keys())
-    default_idx = linhas_opt.index("OPERACIONAL") if "OPERACIONAL" in linhas_opt else 0
+    linhas_opt = [nome for nome in linhas_map if nome in {"DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"}]
+    default_idx = 0
 
     linha_sel = st.selectbox(
         "Selecione a linha para detalhar",
@@ -1150,6 +1195,20 @@ def page_dfc(plano_path: str, plano_sig: Tuple[int, int], dados_path: str, dados
         denom_label="RECEBIMENTOS",
         denom_by_month=receb_by_month,
         ui_key_prefix="dfc",
+    )
+
+    st.divider()
+    render_period_comparator(
+        anos=anos_disponiveis,
+        linhas_opt=[nome for nome, _ in linhas],
+        line_map_for_year=dfc_line_map_for_year,
+        ui_key_prefix="dfc",
+        default_line="OPERACIONAL",
+        current_year=ano_ref,
+        current_months=meses_sel,
+        expense_lines=["DESPESA C/ PESSOAL", "FINANCEIRA", "IMPOSTOS", "OPERACIONAL", "FORNECEDOR", "EMPRÉSTIMOS"],
+        denom_map_for_year=lambda ano: dfc_line_map_for_year(ano).get("RECEBIMENTOS", {}),
+        denom_label="RECEBIMENTOS",
     )
 
 
